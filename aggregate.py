@@ -6,7 +6,7 @@
 
 Needs the gh CLI, signed in.
 """
-import collections, glob, json, math, os, statistics, subprocess, sys, tempfile
+import collections, glob, json, math, os, shutil, statistics, subprocess, sys, tempfile
 
 WORKFLOW = "repro.yml"
 
@@ -29,10 +29,15 @@ groups = collections.defaultdict(list)
 with tempfile.TemporaryDirectory() as tmp:
     for run in runs:
         target = os.path.join(tmp, run)
-        try:
-            gh("run", "download", run, "--pattern", "result-*", "--dir", target)
-        except subprocess.CalledProcessError as e:
-            print(f"run {run}: no results ({e.stderr.strip()})", file=sys.stderr)
+        for attempt in range(3):
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+                gh("run", "download", run, "--pattern", "result-*", "--dir", target)
+                break
+            except subprocess.CalledProcessError as e:
+                error = e.stderr.strip()
+        else:
+            print(f"run {run}: no results ({error})", file=sys.stderr)
             continue
         for f in glob.glob(os.path.join(target, "result-*", "result.json")):
             r = json.load(open(f))

@@ -31,3 +31,11 @@ To combine several runs:
 4. writes `result.json`: runner image, macOS and CoreSimulator versions, both times, the number of devices listed, the runtimes walked.
 
 With `newer_coresimulator`, a job on `xcode-27` copies `XcodeSystemResources.pkg` from its Xcode and passes it to the other jobs through the Actions cache; they install it with `installer` before measuring. The image's default Xcode stays selected. The last job deletes the cache entry. Run the workflow from a branch other than the default branch: pull requests against a branch can read that branch's cache entries.
+
+## Does the newer CoreSimulator break anything?
+
+The "Validate the newer CoreSimulator" workflow (`validate.yml`) runs `validate.sh` on `macos-15` (Xcode 16.4 and 26.3) and `macos-26` (Xcode 26.6 and 26.2), with and without the newer CoreSimulator. For the selected Xcode it boots an iPhone simulator on the iOS runtime matching its SDK, runs a command in it with `simctl spawn`, and runs the tests of `probe-package` on it with `xcodebuild test`. That covers a build, a simulator boot, and installing and running a test runner; it does not cover everything CI does with simulators.
+
+```sh
+gh workflow run validate.yml --ref measure
+```

@@ -1,0 +1,99 @@
+name: Validate the newer CoreSimulator
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    name: CoreSimulator package from xcode-27
+    runs-on: xcode-27
+    steps:
+      - run: |
+          mkdir coresim
+          cp /Applications/Xcode.app/Contents/Resources/Packages/XcodeSystemResources.pkg coresim/
+          xcodebuild -version
+          pkgutil --check-signature coresim/XcodeSystemResources.pkg
+      # Readable by workflows of this branch and pull requests against it; the cleanup job deletes it
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: coresim
+          key: coresim-${{ github.run_id }}
+
+  validate:
+    name: ${{ matrix.target.os }}, Xcode ${{ matrix.target.xcode }}, newer CoreSimulator ${{ matrix.install }}, ${{ matrix.rep }}
+    needs: fetch
+    runs-on: ${{ matrix.target.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The image's default Xcode and one other with an installed iOS simulator matching its SDK
+        target:
+          - { os: macos-15, xcode: '16.4' }
+          - { os: macos-15, xcode: '26.3' }
+          - { os: macos-26, xcode: '26.6' }
+          - { os: macos-26, xcode: '26.2' }
+        install: [false, true]
+        rep: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.install
+        with:
+          path: coresim
+          key: coresim-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Install the newer CoreSimulator
+        if: matrix.install
+        run: |
+          sudo installer -pkg coresim/XcodeSystemResources.pkg -target /
+          rm -rf coresim
+      - name: Select Xcode ${{ matrix.target.xcode }}
+        run: sudo xcode-select -s "/Applications/Xcode_${{ matrix.target.xcode }}.app"
+      - name: Validate
+        run: ./validate.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: validation-${{ matrix.target.os }}-${{ matrix.target.xcode }}-${{ matrix.install }}-${{ matrix.rep }}
+          path: |
+            result.json
+            out/
+
+  summary:
+    needs: validate
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: validation-*
+      - name: Summarise
+        shell: python
+        run: |
+          import collections, glob, json, os, statistics
+          groups = collections.defaultdict(list)
+          for f in glob.glob("validation-*/result.json"):
+              r = json.load(open(f))
+              groups[(r["image"].split()[0], r["xcode"], r["coresimulator"])].append(r)
+          lines = ["| Image | Xcode | CoreSimulator | Jobs | Booted | Ran a command | Tests passed | Boot, median | Test, median |", "|---|---|---|---|---|---|---|---|---|"]
+          for (image, xcode, version), rs in sorted(groups.items()):
+              ok = lambda key: sum(1 for r in rs if r[key])
+              lines.append(f"| {image} | {xcode} | {version} | {len(rs)} | {ok('boot')} | {ok('spawn')} | {ok('test')} "
+                           f"| {statistics.median(r['boot_s'] for r in rs):.1f} s | {statistics.median(r['test_s'] for r in rs):.1f} s |")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("\n".join(lines) + "\n")
+
+  cleanup:
+    needs: [fetch, validate]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - run: gh cache delete "coresim-${{ github.run_id }}" --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
