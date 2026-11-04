@@ -1,0 +1,100 @@
+name: First simctl call
+
+on:
+  workflow_dispatch:
+    inputs:
+      newer_coresimulator:
+        description: "Also run each image with the CoreSimulator package of the xcode-27 image's Xcode installed"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    name: CoreSimulator package from xcode-27
+    if: inputs.newer_coresimulator
+    runs-on: xcode-27
+    steps:
+      - run: |
+          mkdir coresim
+          cp /Applications/Xcode.app/Contents/Resources/Packages/XcodeSystemResources.pkg coresim/
+          xcodebuild -version
+          pkgutil --check-signature coresim/XcodeSystemResources.pkg
+      # Readable by workflows of this branch and pull requests against it; the cleanup job deletes it
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: coresim
+          key: coresim-${{ github.run_id }}
+
+  measure:
+    name: ${{ matrix.os }}, newer CoreSimulator ${{ matrix.install }}, ${{ matrix.rep }}
+    needs: fetch
+    if: always() && (needs.fetch.result == 'success' || needs.fetch.result == 'skipped')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, xcode-27]
+        install: [false, true]
+        rep: [1, 2, 3, 4, 5]
+        exclude:
+          - os: xcode-27
+            install: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.install && inputs.newer_coresimulator
+        with:
+          path: coresim
+          key: coresim-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Install the newer CoreSimulator
+        if: matrix.install && inputs.newer_coresimulator
+        run: |
+          sudo installer -pkg coresim/XcodeSystemResources.pkg -target /
+          rm -rf coresim
+      - name: Measure
+        if: ${{ !matrix.install || inputs.newer_coresimulator }}
+        run: ./measure.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !matrix.install || inputs.newer_coresimulator }}
+        with:
+          name: result-${{ matrix.os }}-${{ matrix.install }}-${{ matrix.rep }}
+          path: result.json
+
+  summary:
+    needs: measure
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: result-*
+      - name: Summarise
+        shell: python
+        run: |
+          import collections, glob, json, os, statistics
+          groups = collections.defaultdict(list)
+          for f in glob.glob("result-*/result.json"):
+              r = json.load(open(f))
+              groups[(r["image"].split()[0], r["coresimulator"])].append(r)
+          lines = ["| Image | CoreSimulator | Jobs | Walked a runtime | First call, median | First call, max | Second call, max |", "|---|---|---|---|---|---|---|"]
+          for (image, version), rs in sorted(groups.items()):
+              firsts = [r["first_call_s"] for r in rs]
+              lines.append(f"| {image} | {version} | {len(rs)} | {sum(1 for r in rs if r['walked'])} | {statistics.median(firsts):.1f} s | {max(firsts):.1f} s | {max(r['second_call_s'] for r in rs):.1f} s |")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("\n".join(lines) + "\n")
+
+  cleanup:
+    needs: [fetch, measure]
+    if: always() && inputs.newer_coresimulator
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - run: gh cache delete "coresim-${{ github.run_id }}" --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
