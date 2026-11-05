@@ -1,0 +1,115 @@
+name: First xcodebuild -showBuildSettings
+
+# Does `xcodebuild -showBuildSettings`, as fastlane runs it, wait for simdiskimaged like the first
+# `xcrun simctl` call does? Uses fastlane's visionOS example (fastlane#30410) and its iOS example.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FASTLANE_SHA: 70b08d70050c8675c95bc46cf672223a488a47c8
+
+jobs:
+  fetch:
+    name: CoreSimulator package from xcode-27
+    runs-on: xcode-27
+    steps:
+      - run: |
+          mkdir coresim
+          cp /Applications/Xcode.app/Contents/Resources/Packages/XcodeSystemResources.pkg coresim/
+          xcodebuild -version
+          pkgutil --check-signature coresim/XcodeSystemResources.pkg
+      # Readable by workflows of this branch and pull requests against it; the cleanup job deletes it
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: coresim
+          key: coresim-sbs-${{ github.run_id }}
+
+  measure:
+    name: ${{ matrix.os }}, ${{ matrix.project.name }}, newer CoreSimulator ${{ matrix.install }}, ${{ matrix.rep }}
+    needs: fetch
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+        project:
+          - { name: visionos, path: gym/examples/visionos/VisionExample.xcodeproj, scheme: VisionExample }
+          - { name: ios, path: gym/examples/standard/Example.xcodeproj, scheme: Example }
+        install: [false, true]
+        rep: [1, 2, 3, 4, 5]
+        exclude:
+          - project: { name: ios, path: gym/examples/standard/Example.xcodeproj, scheme: Example }
+            install: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: fastlane/fastlane
+          ref: ${{ env.FASTLANE_SHA }}
+          path: fastlane
+          sparse-checkout: |
+            gym/examples/visionos
+            gym/examples/standard
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.install
+        with:
+          path: coresim
+          key: coresim-sbs-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Install the newer CoreSimulator
+        if: matrix.install
+        run: |
+          sudo installer -pkg coresim/XcodeSystemResources.pkg -target /
+          rm -rf coresim
+      - name: Measure
+        run: ./measure-showbuildsettings.sh "fastlane/${{ matrix.project.path }}" "${{ matrix.project.scheme }}" out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sbs-${{ matrix.os }}-${{ matrix.project.name }}-${{ matrix.install }}-${{ matrix.rep }}
+          path: |
+            result.json
+            out/first.txt
+            out/sample.txt
+          if-no-files-found: ignore
+
+  summary:
+    needs: measure
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: sbs-*
+      - name: Summarise
+        shell: python
+        run: |
+          import collections, glob, json, os, statistics
+          groups = collections.defaultdict(list)
+          for f in glob.glob("sbs-*/result.json"):
+              r = json.load(open(f))
+              groups[(r["image"].split()[0], r["coresimulator"], r["project"])].append(r)
+          lines = ["| Image | CoreSimulator | Project | Jobs | simdiskimaged started by it | Waited in kickstart | Walked a runtime | First call, median | First call, max | Over fastlane's 45 s | Second call, max |", "|---|---|---|---|---|---|---|---|---|---|---|"]
+          for (image, version, project), rs in sorted(groups.items()):
+              firsts = [r["first_call_s"] for r in rs]
+              started = sum(1 for r in rs if not r["simdiskimaged_running_before"] and r["simdiskimaged_started_at_s"] is not None and r["simdiskimaged_started_at_s"] <= r["first_call_s"])
+              lines.append(f"| {image} | {version} | {project} | {len(rs)} | {started} | {sum(1 for r in rs if r['waited_in_kickstart'])} | {sum(1 for r in rs if r['walked'])} | {statistics.median(firsts):.1f} s | {max(firsts):.1f} s | {sum(1 for x in firsts if x > 45)} | {max(r['second_call_s'] for r in rs):.1f} s |")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("\n".join(lines) + "\n")
+
+  cleanup:
+    needs: [fetch, measure]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - run: gh cache delete "coresim-sbs-${{ github.run_id }}" --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
