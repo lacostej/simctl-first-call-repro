@@ -1,0 +1,23 @@
+name: simctl runtime names
+
+# Which runtime field does `simctl list devices` use in its section headers? (fastlane#30536)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, xcode-27]
+    steps:
+      - run: |
+          echo "$ImageOS $ImageVersion"
+          xcrun simctl list -j runtimes | python3 -c 'import json,sys; [print(r["identifier"], "|", r["name"], "|", r["version"], "|", r.get("isAvailable")) for r in json.load(sys.stdin)["runtimes"]]'
+          xcrun simctl list devices | grep "^-- "
