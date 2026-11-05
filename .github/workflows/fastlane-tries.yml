@@ -1,0 +1,78 @@
+name: fastlane's showBuildSettings tries
+
+# Does fastlane's visionOS spec (fastlane#30410) run out of its 3/6/12/24 s tries on a fresh runner,
+# and does resolving packages first, as fastlane does without skip_package_dependencies_resolution, avoid it?
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FASTLANE_SHA: 70b08d70050c8675c95bc46cf672223a488a47c8
+
+jobs:
+  tries:
+    name: ${{ matrix.leg.os }}, Xcode ${{ matrix.leg.xcode }}, ${{ matrix.mode }}, ${{ matrix.rep }}
+    runs-on: ${{ matrix.leg.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The legs fastlane#30410 failed on
+        leg:
+          - { os: macos-15, xcode: '16.4.0' }
+          - { os: macos-26, xcode: '26.6' }
+        mode: [skip, resolve]
+        rep: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: fastlane/fastlane
+          ref: ${{ env.FASTLANE_SHA }}
+          path: fastlane
+          sparse-checkout: gym/examples/visionos
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: ${{ matrix.leg.xcode }}
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          ruby-version: '3.4'
+      - name: Tries
+        working-directory: fastlane
+        run: |
+          ruby ../fastlane-tries.rb ./gym/examples/visionos/VisionExample.xcodeproj ${{ matrix.mode }}
+          mv result.json ..
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: tries-${{ matrix.leg.os }}-${{ matrix.mode }}-${{ matrix.rep }}
+          path: result.json
+          if-no-files-found: ignore
+
+  summary:
+    needs: tries
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: tries-*
+      - name: Summarise
+        shell: python
+        run: |
+          import collections, glob, json, os
+          groups = collections.defaultdict(list)
+          for f in glob.glob("tries-*/result.json"):
+              r = json.load(open(f))
+              groups[(r["image"].split()[0], r["xcode"], r["mode"])].append(r)
+          lines = ["| Image | Xcode | Mode | Jobs | Ran out of tries | Tries used | showBuildSettings | Resolve | visionOS found |", "|---|---|---|---|---|---|---|---|---|"]
+          for (image, xcode, mode), rs in sorted(groups.items()):
+              shows = sorted(r["show_s"] for r in rs)
+              resolves = sorted(r.get("resolve_s") or 0 for r in rs)
+              lines.append(f"| {image} | {xcode} | {mode} | {len(rs)} | {sum(1 for r in rs if not r['succeeded'])} | {', '.join(str(len(r['tries'])) for r in rs)} | {shows[0]}–{shows[-1]} s | {resolves[0]}–{resolves[-1]} s | {sum(1 for r in rs if 'xros' in (r['supported_platforms'] or ''))} |")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("\n".join(lines) + "\n")
