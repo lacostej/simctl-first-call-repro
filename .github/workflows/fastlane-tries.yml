@@ -5,12 +5,17 @@ name: fastlane's showBuildSettings tries
 
 on:
   workflow_dispatch:
+    inputs:
+      repository:
+        default: fastlane/fastlane
+      ref:
+        default: 70b08d70050c8675c95bc46cf672223a488a47c8
+      modes:
+        description: JSON list of skip and resolve
+        default: '["skip", "resolve"]'
 
 permissions:
   contents: read
-
-env:
-  FASTLANE_SHA: 70b08d70050c8675c95bc46cf672223a488a47c8
 
 jobs:
   tries:
@@ -24,14 +29,14 @@ jobs:
         leg:
           - { os: macos-15, xcode: '16.4.0' }
           - { os: macos-26, xcode: '26.6' }
-        mode: [skip, resolve]
+        mode: ${{ fromJSON(inputs.modes) }}
         rep: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: fastlane/fastlane
-          ref: ${{ env.FASTLANE_SHA }}
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
           path: fastlane
           sparse-checkout: gym/examples/visionos
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
