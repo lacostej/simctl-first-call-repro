@@ -13,6 +13,9 @@ on:
       runs:
         description: Runs per variant and reader, in each job
         default: '20000'
+      variants:
+        description: Regexp of the variant names to run; empty runs them all
+        default: ''
 
 permissions:
   contents: read
@@ -41,7 +44,9 @@ jobs:
         with:
           ruby-version: ${{ matrix.ruby }}
       - name: Spawn
-        run: ruby pty-short-output.rb fastlane/fastlane_core/lib/fastlane_core/fastlane_pty.rb ${{ inputs.runs }} ${{ matrix.processes }}
+        env:
+          VARIANTS: ${{ inputs.variants }}
+        run: ruby pty-short-output.rb fastlane/fastlane_core/lib/fastlane_core/fastlane_pty.rb ${{ inputs.runs }} ${{ matrix.processes }} "$VARIANTS"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

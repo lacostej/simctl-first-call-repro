@@ -2,7 +2,7 @@
 # Runs each command many times through the FastlanePty of a fastlane checkout, reading the output
 # with IO#each, as CommandExecutor.execute does, and with readpartial, and counts what came back.
 # For each run it also records how the read ended (end-of-file or Errno::EIO) and after how long.
-# Usage: ruby pty-short-output.rb <path to fastlane_pty.rb> <runs per variant> <parallel processes>
+# Usage: ruby pty-short-output.rb <path to fastlane_pty.rb> <runs per variant> <parallel processes> [variant name regexp]
 # Writes one line of JSON to result.json.
 require 'json'
 require 'tmpdir'
@@ -10,12 +10,13 @@ require_relative File.expand_path(ARGV[0])
 
 runs = Integer(ARGV[1])
 processes = Integer(ARGV[2])
+only = Regexp.new(ARGV[3].to_s)
 
-# Scripts whose shell is the spawned child: it prints, and pauses before or after printing
+# Scripts the spawned child runs: the shebang picks the interpreter, which the PTY starts without a shell
 SCRIPTS = Dir.mktmpdir("pty-short-output")
-def script(name, body)
+def script(name, body, interpreter: "/bin/sh")
   path = File.join(SCRIPTS, name)
-  File.write(path, "#!/bin/sh\n#{body}\n")
+  File.write(path, "#!#{interpreter}\n#{body}\n")
   File.chmod(0o755, path)
   path
 end
@@ -30,8 +31,13 @@ VARIANTS = [
   { name: "script: echo, pause 100 ms", command: script("after100", "echo foo\nsleep 0.1"), max_runs: 800 },
   { name: "script: echo, pause 1000 ms", command: script("after1000", "echo foo\nsleep 1"), max_runs: 120 },
   { name: "script: pause 10 ms, echo", command: script("before10", "sleep 0.01\necho foo"), max_runs: 4000 },
-  { name: "script: pause 100 ms, echo", command: script("before100", "sleep 0.1\necho foo"), max_runs: 800 }
-].map { |v| { env: {}, expected: "foo" }.merge(v) }.freeze
+  { name: "script: pause 100 ms, echo", command: script("before100", "sleep 0.1\necho foo"), max_runs: 800 },
+  # Is it the shell, or the time the child lives? perl prints with no shell, then pauses; sh replaces itself with /bin/echo
+  { name: "perl: print", command: script("perl", %q($| = 1; print "foo\n";), interpreter: "/usr/bin/perl") },
+  { name: "perl: print, pause 10 ms", command: script("perl10", %q($| = 1; print "foo\n"; select(undef, undef, undef, 0.01);), interpreter: "/usr/bin/perl"), max_runs: 4000 },
+  { name: "perl: print, pause 100 ms", command: script("perl100", %q($| = 1; print "foo\n"; select(undef, undef, undef, 0.1);), interpreter: "/usr/bin/perl"), max_runs: 800 },
+  { name: "script: exec /bin/echo", command: script("exec_echo", "exec /bin/echo foo") }
+].map { |v| { env: {}, expected: "foo" }.merge(v) }.select { |v| v[:name] =~ only }.freeze
 
 # Each reader returns how the read ended
 READERS = {
