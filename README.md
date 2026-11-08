@@ -39,3 +39,7 @@ The "Validate the newer CoreSimulator" workflow (`validate.yml`) runs `validate.
 ```sh
 gh workflow run validate.yml --ref measure
 ```
+
+## FastlanePty and very short commands
+
+`pty-short-output.rb` runs `echo foo` (also with `FASTLANE_EXEC_FLUSH_PTY_WORKAROUND`) and `printf foo` many times through the `FastlanePty.spawn` of a fastlane checkout, reading the output with `IO#each`, as `CommandExecutor.execute` does, and with `readpartial`, and counts the runs whose output was lost ([fastlane#21792](https://github.com/fastlane/fastlane/issues/21792)). Run the "FastlanePty short output" workflow, or `gh workflow run pty-short-output.yml -f ref=master`.

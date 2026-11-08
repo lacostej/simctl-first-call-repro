@@ -1,0 +1,72 @@
+name: FastlanePty short output
+
+# Does FastlanePty.spawn lose the output of very short commands (fastlane#21792), read with IO#each as
+# CommandExecutor.execute does, or with readpartial; and does FASTLANE_EXEC_FLUSH_PTY_WORKAROUND avoid it?
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        default: fastlane/fastlane
+      ref:
+        default: master
+      runs:
+        description: Runs per variant and reader, in each job
+        default: '20000'
+
+permissions:
+  contents: read
+
+jobs:
+  spawn:
+    name: ${{ matrix.os }}, Ruby ${{ matrix.ruby }}, ${{ matrix.processes }} processes
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, ubuntu-24.04]
+        ruby: ['3.2', '3.4']
+        # 4 is the number of rspec workers fastlane's CI runs at once
+        processes: [1, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          path: fastlane
+          sparse-checkout: fastlane_core/lib/fastlane_core
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - name: Spawn
+        run: ruby pty-short-output.rb fastlane/fastlane_core/lib/fastlane_core/fastlane_pty.rb ${{ inputs.runs }} ${{ matrix.processes }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pty-${{ matrix.os }}-ruby${{ matrix.ruby }}-p${{ matrix.processes }}
+          path: result.json
+          if-no-files-found: ignore
+
+  summary:
+    needs: spawn
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pty-*
+      - name: Summarise
+        shell: python
+        run: |
+          import glob, json, os
+          lines = ["| Image | Ruby | Processes | Command | Reader | Lost | What came back instead |", "|---|---|---|---|---|---|---|"]
+          results = [json.load(open(f)) for f in glob.glob("pty-*/result.json")]
+          for r in sorted(results, key=lambda r: (r["image"], r["ruby"], r["processes"])):
+              for row in r["rows"]:
+                  other = {k: v for k, v in row["outputs"].items() if k != row["expected"]}
+                  lines.append(f"| {r['image'] or r['platform']} | {r['ruby']} | {r['processes']} | {row['variant']} | {row['reader']} | {row['lost']}/{row['runs']} | {json.dumps(other) if other else ''} |")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("\n".join(lines) + "\n")
