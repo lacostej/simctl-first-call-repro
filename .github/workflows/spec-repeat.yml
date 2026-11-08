@@ -1,0 +1,106 @@
+name: Repeat fastlane specs
+
+# How often do fastlane specs that run a short command through CommandExecutor.execute fail on a runner
+# (fastlane#21792)? Runs each case's examples many times, in 4 rspec processes at once as fastlane's CI does.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        default: fastlane/fastlane
+      cases:
+        description: JSON list of {name, ref, file, example}
+        default: >-
+          [{"name": "#30563 UTF-8", "ref": "fastlane_core/execute-utf8", "file": "fastlane_core/spec/command_executor_spec.rb", "example": "reads output as UTF-8"},
+           {"name": "#30565 killed", "ref": "fastlane/sh-execute-name-signal", "file": "fastlane_core/spec/command_executor_spec.rb", "example": "names the signal when the command is killed"},
+           {"name": "#30564 error block", "ref": "fastlane_core/execute-error-block-once", "file": "fastlane_core/spec/command_executor_spec.rb", "example": "calls the error block once"},
+           {"name": "master echo foo, flush workaround", "ref": "master", "file": "fastlane_core/spec/command_executor_spec.rb", "example": "executes a simple command successfully"}]
+      times:
+        description: Repetitions in each of the 4 processes
+        default: '2500'
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    name: ${{ matrix.os }}, ${{ matrix.case.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26, ubuntu-24.04]
+        case: ${{ fromJSON(inputs.cases) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ matrix.case.ref }}
+          path: fastlane
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: fastlane
+      - name: Repeat
+        working-directory: fastlane
+        env:
+          REPEAT_SPEC_FILE: ${{ matrix.case.file }}
+          REPEAT_SPEC_TIMES: ${{ inputs.times }}
+          EXAMPLE: ${{ matrix.case.example }}
+        run: |
+          cp ../spec-repeat/repeat_spec.rb .
+          for i in 1 2 3 4; do
+            FASTLANE_SPEC_WORKER=$i bundle exec rspec repeat_spec.rb -e "$EXAMPLE" --format progress --format json --out ../rspec-$i.json > ../rspec-$i.log 2>&1 &
+          done
+          wait || true
+          tail -n 3 ../rspec-*.log
+      - name: Count
+        if: always()
+        env:
+          CASE: ${{ matrix.case.name }}
+          OS: ${{ matrix.os }}
+        shell: python
+        run: |
+          import collections, glob, json, os
+          examples, failures, messages = 0, 0, collections.Counter()
+          for f in glob.glob("rspec-*.json"):
+              r = json.load(open(f))
+              examples += r["summary"]["example_count"]
+              failures += r["summary"]["failure_count"]
+              for e in r["examples"]:
+                  if e["status"] == "failed":
+                      messages[e["full_description"].split(" ", 2)[-1][:80] + " | " + e["exception"]["message"].strip().splitlines()[0][:120]] += 1
+          json.dump({"os": os.environ["OS"], "case": os.environ["CASE"], "examples": examples, "failures": failures, "messages": messages}, open("result.json", "w"))
+          print(examples, failures, dict(messages))
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: repeat-${{ strategy.job-index }}
+          path: |
+            result.json
+            rspec-*.log
+          if-no-files-found: ignore
+
+  summary:
+    needs: repeat
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: repeat-*
+      - name: Summarise
+        shell: python
+        run: |
+          import glob, json, os
+          results = [json.load(open(f)) for f in glob.glob("repeat-*/result.json")]
+          lines = ["| Case | Image | Examples | Failed | Rate | Failures |", "|---|---|---|---|---|---|"]
+          for r in sorted(results, key=lambda r: (r["case"], r["os"])):
+              rate = f"{100 * r['failures'] / r['examples']:.2f}%" if r["examples"] else ""
+              lines.append(f"| {r['case']} | {r['os']} | {r['examples']} | {r['failures']} | {rate} | {'; '.join(f'{n}× {m}' for m, n in r['messages'].items())} |")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("\n".join(lines) + "\n")
